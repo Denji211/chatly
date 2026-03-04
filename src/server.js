@@ -34,9 +34,9 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Chatly running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => console.log(`🚀 Chatly on http://localhost:${PORT}`));
+}
 
-module.exports = { app, io, db };
+module.exports = app;
