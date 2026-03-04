@@ -142,3 +142,4 @@ chatly/
 *Chatly — Vis l'instant. Parle vrai.*
 "# chatly" 
 "# chatly" 
+"# chatly.com" 
