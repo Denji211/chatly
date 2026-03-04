@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'chatly_super_secret_2025_change_in_prod';
+const SECRET = process.env.JWT_SECRET || 'chatly_dev_secret_change_in_prod';
 
 module.exports = (req, res, next) => {
   const auth = req.headers.authorization;
@@ -7,8 +7,7 @@ module.exports = (req, res, next) => {
     return res.status(401).json({ error: 'Token manquant' });
   }
   try {
-    const token = auth.split(' ')[1];
-    req.user = jwt.verify(token, JWT_SECRET);
+    req.user = jwt.verify(auth.split(' ')[1], SECRET);
     next();
   } catch {
     return res.status(401).json({ error: 'Token invalide ou expiré' });

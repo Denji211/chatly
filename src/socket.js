@@ -1,32 +1,23 @@
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'chatly_super_secret_2025_change_in_prod';
+const SECRET = process.env.JWT_SECRET || 'chatly_dev_secret_change_in_prod';
 
 module.exports = (io, db) => {
-  // Auth middleware for Socket.io
   io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (!token) return next(new Error('Authentication required'));
     try {
-      socket.user = jwt.verify(token, JWT_SECRET);
+      socket.user = jwt.verify(socket.handshake.auth.token, SECRET);
       next();
     } catch {
-      next(new Error('Invalid token'));
+      next(new Error('Auth invalide'));
     }
   });
 
   io.on('connection', (socket) => {
     const userId = socket.user.id;
-    console.log(`🔌 ${socket.user.username} connected [${socket.id}]`);
-
-    // Mark online
     db.onlineUsers.set(userId, socket.id);
-    db.updateUser(userId, {});
+    socket.join(`user:${userId}`);
     socket.broadcast.emit('user:online', { userId });
 
-    // Join personal room
-    socket.join(`user:${userId}`);
-
-    // ── Conversations ──────────────────────────────────────
+    // ── Conversations ────────────────────────────────────────
     socket.on('conv:join', ({ convId }) => {
       const conv = db.conversations.get(convId);
       if (conv?.participants.includes(userId)) {
@@ -35,86 +26,63 @@ module.exports = (io, db) => {
       }
     });
 
-    socket.on('conv:leave', ({ convId }) => {
-      socket.leave(`conv:${convId}`);
+    socket.on('conv:read', ({ convId }) => {
+      db.markRead(convId, userId);
+      socket.to(`conv:${convId}`).emit('conv:read', { convId, userId });
     });
 
-    // ── Messages ───────────────────────────────────────────
+    // ── Messages ─────────────────────────────────────────────
     socket.on('message:send', ({ convId, type, content, duration, tempId }, ack) => {
       const conv = db.conversations.get(convId);
-      if (!conv?.participants.includes(userId)) {
-        return ack?.({ error: 'Accès refusé' });
-      }
+      if (!conv?.participants.includes(userId)) return ack?.({ error: 'Accès refusé' });
 
       const msg = db.createMessage({ convId, senderId: userId, type, content, duration });
-      const serialized = {
-        ...msg,
-        reactions: Object.fromEntries(
-          Object.entries(msg.reactions).map(([k, v]) => [k, v instanceof Set ? [...v] : v])
-        )
-      };
 
-      // Send to all in conversation room (including sender)
-      io.to(`conv:${convId}`).emit('message:new', { message: serialized, tempId });
+      io.to(`conv:${convId}`).emit('message:new', { message: msg, tempId });
 
-      // Notify other participants who aren't in the room
+      // Notif pour les participants hors de la room
       conv.participants.filter(p => p !== userId).forEach(p => {
-        const otherSocket = db.onlineUsers.get(p);
-        if (otherSocket) {
-          io.to(`user:${p}`).emit('notification:message', {
-            convId,
-            senderId: userId,
-            senderName: db.getUserById(userId)?.displayName,
-            senderAvatar: db.getUserById(userId)?.avatar,
-            preview: type === 'text' ? content?.slice(0, 80) : '🎙️ Message vocal',
-            messageId: msg.id
-          });
-        }
-      });
-
-      // Update conv list for all participants
-      conv.participants.forEach(p => {
+        const sender = db.getUserById(userId);
+        io.to(`user:${p}`).emit('notification:message', {
+          convId,
+          senderId: userId,
+          senderName: sender?.displayName,
+          senderAvatar: sender?.avatar,
+          preview: type === 'text' ? (content?.slice(0, 80) || '') : '🎙️ Message vocal',
+        });
         io.to(`user:${p}`).emit('conv:updated', {
           convId,
           lastMessage: conv.lastMessage,
           lastMessageAt: conv.lastMessageAt,
-          unread: conv.unreadCount[p] || 0
+          unread: conv.unreadCount[p] || 0,
         });
       });
 
-      ack?.({ message: serialized });
+      io.to(`user:${userId}`).emit('conv:updated', {
+        convId, lastMessage: conv.lastMessage,
+        lastMessageAt: conv.lastMessageAt, unread: 0,
+      });
+
+      ack?.({ message: msg });
     });
 
-    // ── Reactions ──────────────────────────────────────────
     socket.on('message:react', ({ msgId, convId, emoji }) => {
       const msg = db.addReaction(msgId, userId, emoji);
-      if (msg) {
-        const serialized = {
-          ...msg,
-          reactions: Object.fromEntries(
-            Object.entries(msg.reactions).map(([k, v]) => [k, v instanceof Set ? [...v] : v])
-          )
-        };
-        io.to(`conv:${convId}`).emit('message:reaction', { msgId, reactions: serialized.reactions, userId, emoji });
-      }
+      if (msg) io.to(`conv:${convId}`).emit('message:reaction', { msgId, reactions: msg.reactions, userId, emoji });
     });
 
-    // ── Delete message ─────────────────────────────────────
     socket.on('message:delete', ({ msgId, convId }) => {
-      const ok = db.deleteMessage(msgId, userId);
-      if (ok) {
+      if (db.deleteMessage(msgId, userId)) {
         io.to(`conv:${convId}`).emit('message:deleted', { msgId });
       }
     });
 
-    // ── Typing ─────────────────────────────────────────────
+    // ── Typing ────────────────────────────────────────────────
     socket.on('typing:start', ({ convId }) => {
       if (!db.typingUsers.has(convId)) db.typingUsers.set(convId, new Set());
       db.typingUsers.get(convId).add(userId);
       socket.to(`conv:${convId}`).emit('typing:update', {
-        convId, userId,
-        displayName: db.getUserById(userId)?.displayName,
-        typing: true
+        convId, userId, displayName: db.getUserById(userId)?.displayName, typing: true,
       });
     });
 
@@ -123,30 +91,19 @@ module.exports = (io, db) => {
       socket.to(`conv:${convId}`).emit('typing:update', { convId, userId, typing: false });
     });
 
-    // ── Read receipts ──────────────────────────────────────
-    socket.on('conv:read', ({ convId }) => {
-      db.markRead(convId, userId);
-      const conv = db.conversations.get(convId);
-      if (conv) {
-        socket.to(`conv:${convId}`).emit('conv:read', { convId, userId });
-      }
-    });
-
-    // ── WebRTC Signaling ───────────────────────────────────
+    // ── Appels WebRTC ─────────────────────────────────────────
     socket.on('call:invite', ({ targetId, type, callId }) => {
       const caller = db.getUserById(userId);
       io.to(`user:${targetId}`).emit('call:incoming', {
         callId, callerId: userId, type,
         callerName: caller?.displayName,
-        callerAvatar: caller?.avatar
+        callerAvatar: caller?.avatar,
       });
     });
 
     socket.on('call:accept', ({ callId, callerId }) => {
-      io.to(`user:${callerId}`).emit('call:accepted', { callId });
-      // Join a shared room for WebRTC
       socket.join(`call:${callId}`);
-      io.to(`user:${callerId}`).emit('call:join', { callId });
+      io.to(`user:${callerId}`).emit('call:accepted', { callId });
     });
 
     socket.on('call:decline', ({ callId, callerId }) => {
@@ -158,26 +115,16 @@ module.exports = (io, db) => {
       io.to(`call:${callId}`).emit('call:ended', { callId });
     });
 
-    // WebRTC SDP/ICE
-    socket.on('webrtc:offer', ({ callId, targetId, offer }) => {
-      io.to(`user:${targetId}`).emit('webrtc:offer', { callId, offer, fromId: userId });
-    });
+    socket.on('webrtc:offer',  ({ callId, targetId, offer })     => io.to(`user:${targetId}`).emit('webrtc:offer',  { callId, offer, fromId: userId }));
+    socket.on('webrtc:answer', ({ callId, targetId, answer })    => io.to(`user:${targetId}`).emit('webrtc:answer', { callId, answer }));
+    socket.on('webrtc:ice',    ({ callId, targetId, candidate }) => io.to(`user:${targetId}`).emit('webrtc:ice',    { callId, candidate }));
 
-    socket.on('webrtc:answer', ({ callId, targetId, answer }) => {
-      io.to(`user:${targetId}`).emit('webrtc:answer', { callId, answer });
-    });
-
-    socket.on('webrtc:ice', ({ callId, targetId, candidate }) => {
-      io.to(`user:${targetId}`).emit('webrtc:ice', { callId, candidate });
-    });
-
-    // ── Disconnect ─────────────────────────────────────────
+    // ── Disconnect ────────────────────────────────────────────
     socket.on('disconnect', () => {
-      console.log(`❌ ${socket.user.username} disconnected`);
       db.onlineUsers.delete(userId);
-      db.users.get(userId) && (db.users.get(userId).lastSeen = Date.now());
+      const u = db.users.get(userId);
+      if (u) u.lastSeen = Date.now();
       socket.broadcast.emit('user:offline', { userId, lastSeen: Date.now() });
-      // Stop all typing
       for (const [convId, set] of db.typingUsers) {
         if (set.has(userId)) {
           set.delete(userId);

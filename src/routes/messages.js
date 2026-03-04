@@ -1,41 +1,31 @@
 const express = require('express');
-const router = express.Router();
-const auth = require('../middleware/auth');
-const db = require('../db');
+const router  = express.Router();
+const auth    = require('../middleware/auth');
+const db      = require('../db');
 
 // GET /api/messages/conversations
 router.get('/conversations', auth, (req, res) => {
-  const convs = db.getConversationsForUser(req.user.id);
-  res.json({ conversations: convs });
+  res.json({ conversations: db.getConversationsForUser(req.user.id) });
+});
+
+// POST /api/messages/conversation/:targetId
+router.post('/conversation/:targetId', auth, (req, res) => {
+  if (!db.getUserById(req.params.targetId))
+    return res.status(404).json({ error: 'Utilisateur introuvable' });
+  const conversation = db.getOrCreateConversation(req.user.id, req.params.targetId);
+  res.json({ conversation });
 });
 
 // GET /api/messages/:convId
 router.get('/:convId', auth, (req, res) => {
   const conv = db.conversations.get(req.params.convId);
-  if (!conv || !conv.participants.includes(req.user.id)) {
+  if (!conv || !conv.participants.includes(req.user.id))
     return res.status(403).json({ error: 'Accès refusé' });
-  }
-  const messages = db.getMessages(req.params.convId);
-  // Serialize reactions (Set -> Array)
-  const serialized = messages.map(m => ({
-    ...m,
-    reactions: Object.fromEntries(
-      Object.entries(m.reactions).map(([k, v]) => [k, v instanceof Set ? [...v] : v])
-    )
-  }));
   db.markRead(req.params.convId, req.user.id);
-  res.json({ messages: serialized });
+  res.json({ messages: db.getMessages(req.params.convId) });
 });
 
-// POST /api/messages/:convId — create conversation
-router.post('/conversation/:targetId', auth, (req, res) => {
-  const target = db.getUserById(req.params.targetId);
-  if (!target) return res.status(404).json({ error: 'Utilisateur introuvable' });
-  const conv = db.getOrCreateConversation(req.user.id, req.params.targetId);
-  res.json({ conversation: conv });
-});
-
-// DELETE /api/messages/:msgId — delete message
+// DELETE /api/messages/:msgId
 router.delete('/:msgId', auth, (req, res) => {
   const ok = db.deleteMessage(req.params.msgId, req.user.id);
   if (!ok) return res.status(403).json({ error: 'Impossible de supprimer' });
